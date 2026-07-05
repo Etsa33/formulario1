@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0">
+<title>Bitácora de Campo</title>
+
+<!--
+==================================================================================
+  CONFIGURACIÓN
+==================================================================================
+-->
+<script>
+const CONFIG = {
+  FORM_ACTION_URL: "https://docs.google.com/forms/d/e/1FAIpQLSfZC_4e5OzEG49y_KxsZzYgITO074BvN0ahqpzEKR2iuWXcgA/formResponse",
+
+  ENTRY: {
+    nombre:       "entry.915406907",
+    descripcion:  "entry.1905616449",
+    longitud:     "entry.584523664",
+    latitud:      "entry.1562687582",
+    hora:         "entry.1164773137",   // pregunta nativa "Hora" -> _hour / _minute
+    fecha:        "entry.1800590597",   // pregunta nativa "Fecha" -> _year / _month / _day
+    fotografia:   ""                    // PENDIENTE: coloca aquí el entry.xxxx si tu form tiene pregunta de foto
+  },
+
+  IMG_MAX_DIM: 700,
+  IMG_QUALITY: 0.55
+};
+
+// ---------- Configuración del mapa de TODOS los registros (Google Sheets) ----------
+const MAP_CONFIG = {
+  // ID de la hoja de respuestas: en la URL de Sheets, la parte entre "/d/" y "/edit"
+  SHEET_ID: "1rfYRNU9XRkWbmxrwE0xXy_4aErgjJ2AoIw9RxGoCgt0",
+  SHEET_NAME: "Respuestas de formulario 1", // nombre exacto de la pestaña
+  COLS: {
+    nombre: "Nombre",
+    descripcion: "Descripción",
+    latitud: "Latitud",
+    longitud: "Longitud",
+    fecha: "Fecha",
+    hora: "Hora",
+    foto: "Fotografía"
+  },
+  REFRESH_MS: 60000
+};
+</script>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"/>
+
+<style>
+  :root{
+    --ink:#12181a;
+    --surface:#1b2426;
+    --surface-raised:#212c2e;
+    --line:#33453f;
+    --signal:#ff7a30;
+    --signal-dim:#a4501f;
+    --foliage:#6fcf97;
+    --text:#eef1ec;
+    --text-dim:#93a29b;
+    --danger:#ff5c5c;
+    --font-display:'Space Grotesk', system-ui, sans-serif;
+    --font-mono:'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+    --font-body:'Work Sans', system-ui, sans-serif;
+  }
+
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0; padding:0; height:100%; overflow:hidden;
+    background:var(--ink); color:var(--text); font-family:var(--font-body);
+  }
+
+  .app{
+    display:flex; flex-direction:column; height:100dvh; height:100vh;
+  }
+
+  /* ---------- header mínimo ---------- */
+  header.top{
+    flex:0 0 auto;
+    display:flex; align-items:center; justify-content:space-between;
+    padding:10px 14px; background:var(--surface); border-bottom:1px solid var(--line);
+    z-index:20;
+  }
+  header.top .title{ display:flex; flex-direction:column; }
+  header.top .eyebrow{ font-family:var(--font-mono); font-size:9px; letter-spacing:.12em; color:var(--foliage); text-transform:uppercase; }
+  header.top h1{ font-family:var(--font-display); font-size:15px; margin:2px 0 0; font-weight:600; }
+  header.top .badge{
+    font-family:var(--font-mono); font-size:10px; color:var(--text-dim);
+    border:1px solid var(--line); border-radius:20px; padding:4px 9px; white-space:nowrap;
+  }
+
+  /* ---------- mapa como eje central ---------- */
+  .map-stage{
+    position:relative; flex:1 1 auto; min-height:0;
+  }
+  #map{ position:absolute; inset:0; z-index:1; filter:saturate(1.05); }
+
+  .map-readout{
+    position:absolute; top:54px; left:10px; right:10px; z-index:15;
+    display:flex; gap:8px; pointer-events:none;
+  }
+  .chip{
+    background:rgba(27,36,38,.88); backdrop-filter:blur(4px);
+    border:1px solid var(--line); border-radius:10px;
+    padding:7px 10px; font-family:var(--font-mono); font-size:11px; color:var(--text);
+    flex:1; pointer-events:auto;
+  }
+  .chip .k{ color:var(--text-dim); font-size:9px; letter-spacing:.08em; text-transform:uppercase; display:block; margin-bottom:1px;}
+  .chip .v.pending{ color:var(--text-dim); }
+
+  .fab-locate{
+    position:absolute; right:12px; bottom:14px; z-index:15;
+    width:52px; height:52px; border-radius:50%;
+    background:var(--signal); border:none; color:#1a0f08;
+    display:flex; align-items:center; justify-content:center;
+    box-shadow:0 4px 14px rgba(0,0,0,.4); cursor:pointer;
+  }
+  .fab-locate svg{ width:24px; height:24px; }
+  .fab-locate.locating{ animation:pulse 1s ease-in-out infinite; }
+  @keyframes pulse{ 0%,100%{opacity:1;} 50%{opacity:.55;} }
+
+  .gps-error-toast{
+    position:absolute; left:10px; right:10px; bottom:76px; z-index:16;
+    background:rgba(255,92,92,.14); border:1px solid var(--danger); color:#ffd7d7;
+    font-size:12px; padding:9px 12px; border-radius:10px; display:none;
+  }
+
+  /* dot de usuario en el mapa */
+  .user-dot{
+    width:18px; height:18px; border-radius:50%;
+    background:var(--signal); border:3px solid #fff2;
+    box-shadow:0 0 0 6px rgba(255,122,48,.25);
+  }
+
+  /* ---------- hoja inferior (form) ---------- */
+  .sheet{
+    flex:0 0 auto; max-height:52vh; overflow-y:auto;
+    background:var(--surface); border-top:1px solid var(--line);
+    border-radius:18px 18px 0 0; box-shadow:0 -6px 20px rgba(0,0,0,.35);
+    position:relative; z-index:10;
+    padding:14px 16px 18px;
+  }
+  .sheet-handle{
+    width:36px; height:4px; border-radius:3px; background:var(--line);
+    margin:0 auto 12px;
+  }
+
+  form{ display:flex; flex-direction:column; gap:12px; }
+  .field label{
+    display:block; font-size:11px; font-family:var(--font-mono);
+    letter-spacing:.06em; text-transform:uppercase; color:var(--text-dim);
+    margin-bottom:5px;
+  }
+  .field label .req{ color:var(--signal); margin-left:3px; }
+  .field input[type=text], .field textarea, .field select{
+    width:100%; background:var(--surface-raised); border:1px solid var(--line);
+    border-radius:10px; color:var(--text); padding:11px 12px;
+    font-family:var(--font-body); font-size:15px; resize:vertical;
+  }
+  .field textarea{ min-height:64px; }
+  .field input:focus, .field textarea:focus, .field select:focus{ outline:none; border-color:var(--signal); }
+  .field select{ appearance:none; -webkit-appearance:none; }
+
+  .photo-row{ display:flex; align-items:center; gap:10px; }
+  .photo-box{
+    flex:1; border:1.5px dashed var(--line); border-radius:10px;
+    padding:11px; text-align:center; cursor:pointer; position:relative;
+    background:var(--surface-raised); font-size:12px; color:var(--text-dim);
+  }
+  .photo-box input[type=file]{ position:absolute; inset:0; opacity:0; cursor:pointer; }
+  .photo-thumb{
+    width:52px; height:52px; border-radius:10px; object-fit:cover;
+    border:1px solid var(--line); display:none; flex:0 0 auto;
+  }
+
+  .error-msg{ color:var(--danger); font-size:11px; margin-top:4px; display:none; font-family:var(--font-mono); }
+
+  button.submit{
+    margin-top:4px; padding:15px; border:none; border-radius:12px;
+    background:var(--signal); color:#1a0f08; font-family:var(--font-display);
+    font-weight:700; font-size:15px; cursor:pointer;
+  }
+  button.submit:disabled{ opacity:.5; }
+
+  .pending-bar{
+    display:none; align-items:center; justify-content:space-between; gap:10px;
+    background:var(--surface-raised); border:1px solid var(--line); border-radius:10px;
+    padding:9px 12px; font-family:var(--font-mono); font-size:11px; color:var(--text-dim);
+  }
+  .pending-bar button{
+    background:none; border:1px solid var(--line); color:var(--foliage);
+    border-radius:8px; padding:6px 10px; font-family:var(--font-mono); font-size:10px; cursor:pointer;
+  }
+
+  /* success overlay */
+  .success-screen{
+    position:fixed; inset:0; background:var(--ink); z-index:30;
+    display:none; align-items:center; justify-content:center; flex-direction:column;
+    text-align:center; padding:30px;
+  }
+  .success-screen.show{ display:flex; }
+  .success-screen .mark{
+    width:66px;height:66px;border-radius:50%; border:2px solid var(--foliage);
+    display:flex;align-items:center;justify-content:center; margin-bottom:18px;
+    font-size:30px; color:var(--foliage);
+  }
+  .success-screen h2{ font-family:var(--font-display); margin:0 0 8px; font-size:19px;}
+  .success-screen p{ color:var(--text-dim); font-size:13px; max-width:300px; margin:0 0 20px;}
+  .success-screen button{
+    padding:12px 22px; border-radius:10px; border:1px solid var(--line);
+    background:transparent; color:var(--text); font-family:var(--font-mono); font-size:12px;
+    letter-spacing:.06em; text-transform:uppercase; cursor:pointer;
+  }
+
+  iframe#hidden_iframe{ display:none; }
+
+  /* ---------- pestañas ---------- */
+  .tabs{ display:flex; gap:6px; }
+  .tab-btn{
+    font-family:var(--font-mono); font-size:10px; letter-spacing:.05em; text-transform:uppercase;
+    background:transparent; border:1px solid var(--line); color:var(--text-dim);
+    border-radius:20px; padding:6px 11px; cursor:pointer;
+  }
+  .tab-btn.active{ background:var(--signal); border-color:var(--signal); color:#1a0f08; }
+
+  /* ---------- vista de mapa de registros ---------- */
+  #recordsView{ display:none; flex:1 1 auto; min-height:0; position:relative; }
+  #recordsMap{ position:absolute; inset:0; z-index:1; }
+
+  .records-top{
+    position:absolute; top:10px; left:10px; right:10px; z-index:15;
+    display:flex; gap:8px; justify-content:space-between; align-items:center;
+  }
+  .records-top .count{
+    background:rgba(27,36,38,.9); border:1px solid var(--line); border-radius:20px;
+    padding:6px 12px; font-family:var(--font-mono); font-size:11px; color:var(--text);
+  }
+  .records-top button{
+    background:rgba(27,36,38,.9); border:1px solid var(--line); color:var(--foliage);
+    border-radius:20px; padding:6px 12px; font-family:var(--font-mono); font-size:11px; cursor:pointer;
+  }
+  .records-empty{
+    position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+    z-index:12; color:var(--text-dim); font-family:var(--font-mono); font-size:12px;
+    text-align:center; padding:0 30px; display:none;
+  }
+  .loading-bar{
+    position:absolute; top:0; left:0; height:2px; background:var(--signal); width:0%;
+    transition:width .3s ease; z-index:20;
+  }
+  .leaflet-popup-content-wrapper{ background:var(--surface); color:var(--text); border-radius:12px; border:1px solid var(--line); }
+  .leaflet-popup-tip{ background:var(--surface); }
+  .popup-card{ font-family:var(--font-body); font-size:13px; max-width:220px; }
+  .popup-card img{ width:100%; border-radius:8px; margin-bottom:8px; display:block; }
+  .popup-card h3{ font-family:var(--font-display); font-size:14px; margin:0 0 4px; }
+  .popup-card p{ margin:0 0 6px; color:var(--text-dim); line-height:1.4; }
+  .popup-card .meta{ font-family:var(--font-mono); font-size:10px; color:var(--text-dim); }
+
+  /* ---------- selector automático / manual ---------- */
+  .mode-toggle{
+    position:absolute; top:10px; left:10px; z-index:16;
+    display:flex; gap:4px; background:rgba(27,36,38,.9); border:1px solid var(--line);
+    border-radius:20px; padding:3px;
+  }
+  .mode-btn{
+    font-family:var(--font-mono); font-size:10px; letter-spacing:.04em; text-transform:uppercase;
+    background:transparent; border:none; color:var(--text-dim);
+    border-radius:16px; padding:6px 10px; cursor:pointer;
+  }
+  .mode-btn.active{ background:var(--signal); color:#1a0f08; }
+
+  .manual-hint{
+    position:absolute; left:10px; right:10px; top:100px; z-index:14;
+    background:rgba(27,36,38,.88); border:1px solid var(--line); border-radius:10px;
+    padding:8px 12px; font-size:12px; color:var(--text-dim); text-align:center;
+    display:none;
+  }
+
+  .manual-coords-row{ display:flex; gap:8px; }
+  .manual-coords-row input{
+    width:100%; background:var(--surface-raised); border:1px solid var(--line);
+    border-radius:10px; color:var(--text); padding:11px 12px; font-family:var(--font-mono); font-size:14px;
+  }
+  .manual-coords-row input:focus{ outline:none; border-color:var(--signal); }
+
+  .manual-marker{
+    width:20px; height:20px; border-radius:50% 50% 50% 0; transform:rotate(-45deg);
+    background:var(--signal); border:2px solid #1a0f08;
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <header class="top">
+    <div class="title">
+      <div class="eyebrow">Registro en campo</div>
+      <h1>Bitácora Georreferenciada</h1>
+    </div>
+    <div class="tabs">
+      <span class="badge" id="onlineBadge">●</span>
+      <button type="button" class="tab-btn active" id="tabCapture">Capturar</button>
+      <button type="button" class="tab-btn" id="tabRecords">Ver mapa</button>
+    </div>
+  </header>
+
+  <div id="captureView" style="display:flex; flex-direction:column; flex:1; min-height:0;">
+  <div class="map-stage">
+    <div id="map"></div>
+
+    <div class="mode-toggle" id="modeToggle">
+      <button type="button" class="mode-btn active" data-mode="auto">GPS automático</button>
+      <button type="button" class="mode-btn" data-mode="manual">Manual</button>
+    </div>
+
+    <div class="map-readout">
+      <div class="chip">
+        <span class="k">Lat</span>
+        <span class="v pending" id="latVal">— —</span>
+      </div>
+      <div class="chip">
+        <span class="k">Lon</span>
+        <span class="v pending" id="lonVal">— —</span>
+      </div>
+      <div class="chip">
+        <span class="k">Precisión</span>
+        <span class="v pending" id="accVal">— —</span>
+      </div>
+    </div>
+
+    <div class="gps-error-toast" id="gpsError"></div>
+    <div class="manual-hint" id="manualHint">Toca el mapa para marcar tu ubicación</div>
+
+    <button type="button" class="fab-locate" id="btnLocate" title="Obtener ubicación">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="3"></circle>
+        <path d="M12 2v3M12 19v3M2 12h3M19 12h3"></path>
+      </svg>
+    </button>
+  </div>
+
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+
+    <form id="fieldForm" novalidate>
+      <div class="field">
+        <label for="nombre">Nombre<span class="req">*</span></label>
+        <input type="text" id="nombre" autocomplete="name" placeholder="Ej. María Fernández">
+        <div class="error-msg" id="err-nombre">Este campo es obligatorio.</div>
+      </div>
+
+      <div class="field">
+        <label for="descripcion">Descripción<span class="req">*</span></label>
+        <textarea id="descripcion" placeholder="Describe lo observado…"></textarea>
+        <div class="error-msg" id="err-descripcion">Este campo es obligatorio.</div>
+      </div>
+
+      <div class="field manual-coords" id="manualCoords" style="display:none;">
+        <label>Coordenadas manuales<span class="req">*</span></label>
+        <div class="manual-coords-row">
+          <input type="text" id="manualLat" inputmode="decimal" placeholder="Latitud, ej. -0,194274">
+          <input type="text" id="manualLon" inputmode="decimal" placeholder="Longitud, ej. -78,366554">
+        </div>
+        <div class="error-msg" id="err-manual">Ingresa coordenadas válidas (lat -90 a 90, lon -180 a 180).</div>
+      </div>
+
+      <div class="field">
+        <label>Fotografía</label>
+        <div class="photo-row">
+          <div class="photo-box" id="photoBox">
+            Tocar para tomar/elegir foto
+            <input type="file" id="foto" accept="image/*" capture="environment">
+          </div>
+          <img id="fotoPreview" class="photo-thumb" alt="Vista previa">
+        </div>
+      </div>
+
+      <button type="submit" class="submit" id="btnSubmit">Registrar punto</button>
+
+      <div class="pending-bar" id="pendingBar">
+        <span id="pendingText">0 registros pendientes</span>
+        <button type="button" id="btnSync">Reintentar</button>
+      </div>
+    </form>
+  </div>
+  </div>
+
+  <div id="recordsView">
+    <div class="loading-bar" id="loadingBar"></div>
+    <div id="recordsMap"></div>
+    <div class="records-top">
+      <span class="count" id="countBadge">0 registros</span>
+      <button type="button" id="btnRefreshRecords">Actualizar</button>
+    </div>
+    <div class="records-empty" id="recordsEmpty">Aún no hay registros, o falta configurar SHEET_ID en el código.</div>
+  </div>
+</div>
+
+<div class="success-screen" id="successScreen">
+  <div class="mark">✓</div>
+  <h2>Punto registrado</h2>
+  <p>La información se envió correctamente. Puedes capturar el siguiente punto.</p>
+  <button id="btnAnother">Registrar otro punto</button>
+  <button id="btnGoRecords" style="margin-top:10px;">Ver mapa de registros</button>
+</div>
+
+<iframe name="hidden_iframe" id="hidden_iframe"></iframe>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+<script>
+(function(){
+  "use strict";
+
+  const state = { lat:null, lon:null, acc:null, photoBase64:"" };
+  const QUEUE_KEY = "geoform_pending_v2";
+
+  // ---------- mapa base ----------
+  const map = L.map('map', { zoomControl:false, attributionControl:false }).setView([-0.1807, -78.4678], 13);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    maxZoom: 19, subdomains:'abcd'
+  }).addTo(map);
+  L.control.zoom({ position:'bottomleft' }).addTo(map);
+
+  const userIcon = L.divIcon({ className:'', html:'<div class="user-dot"></div>', iconSize:[18,18] });
+  let userMarker = null;
+  let userAccuracyCircle = null;
+
+  // ---------- online badge ----------
+  function updateOnlineBadge(){
+    const el = document.getElementById("onlineBadge");
+    if(navigator.onLine){ el.textContent = "● en línea"; el.style.color = "#6fcf97"; }
+    else { el.textContent = "● sin conexión"; el.style.color = "#ff5c5c"; }
+  }
+  window.addEventListener("online", ()=>{ updateOnlineBadge(); trySync(); });
+  window.addEventListener("offline", updateOnlineBadge);
+  updateOnlineBadge();
+
+  // ---------- fecha/hora (preguntas nativas de Google Forms) ----------
+  function nowParts(){
+    const d = new Date();
+    return {
+      year: d.getFullYear(),
+      month: d.getMonth()+1,
+      day: d.getDate(),
+      hour: String(d.getHours()).padStart(2,"0"),
+      minute: String(d.getMinutes()).padStart(2,"0")
+    };
+  }
+
+  // ---------- geolocalización ----------
+  const btnLocate = document.getElementById("btnLocate");
+  const latVal = document.getElementById("latVal");
+  const lonVal = document.getElementById("lonVal");
+  const accVal = document.getElementById("accVal");
+  const gpsError = document.getElementById("gpsError");
+
+  function locate(){
+    gpsError.style.display = "none";
+    if(!("geolocation" in navigator)){
+      gpsError.textContent = "Este navegador no soporta geolocalización.";
+      gpsError.style.display = "block";
+      return;
+    }
+    btnLocate.classList.add("locating");
+
+    navigator.geolocation.getCurrentPosition(function(pos){
+      btnLocate.classList.remove("locating");
+      state.lat = pos.coords.latitude;
+      state.lon = pos.coords.longitude;
+      state.acc = pos.coords.accuracy;
+
+      latVal.textContent = state.lat.toFixed(6).replace(".", ",");
+      latVal.classList.remove("pending");
+      lonVal.textContent = state.lon.toFixed(6).replace(".", ",");
+      lonVal.classList.remove("pending");
+      accVal.textContent = `± ${Math.round(state.acc)} m`;
+      accVal.classList.remove("pending");
+
+      const ll = [state.lat, state.lon];
+      map.setView(ll, 17);
+
+      if(userMarker){
+        userMarker.setLatLng(ll);
+      } else {
+        userMarker = L.marker(ll, { icon:userIcon }).addTo(map);
+      }
+      userMarker.bindPopup(`Estás aquí · ± ${Math.round(state.acc)} m`).openPopup();
+
+      if(userAccuracyCircle){
+        userAccuracyCircle.setLatLng(ll).setRadius(state.acc);
+      } else {
+        userAccuracyCircle = L.circle(ll, {
+          radius: state.acc,
+          color: "#ff7a30", weight:1, fillColor:"#ff7a30", fillOpacity:0.12
+        }).addTo(map);
+      }
+    }, function(err){
+      btnLocate.classList.remove("locating");
+      let msg = "No se pudo obtener la ubicación.";
+      if(err.code === err.PERMISSION_DENIED) msg = "Permiso de ubicación denegado. Actívalo en el navegador.";
+      else if(err.code === err.TIMEOUT) msg = "Tiempo de espera agotado buscando señal GPS.";
+      gpsError.textContent = msg;
+      gpsError.style.display = "block";
+    }, { enableHighAccuracy:true, timeout:15000, maximumAge:0 });
+  }
+
+  btnLocate.addEventListener("click", locate);
+  window.addEventListener("load", locate);
+
+  // ---------- modo automático / manual ----------
+  let currentMode = "auto";
+  const modeToggle = document.getElementById("modeToggle");
+  const manualHint = document.getElementById("manualHint");
+  const manualCoords = document.getElementById("manualCoords");
+  const manualLatInput = document.getElementById("manualLat");
+  const manualLonInput = document.getElementById("manualLon");
+  let manualMarker = null;
+  const manualIcon = L.divIcon({ className:'', html:'<div class="manual-marker"></div>', iconSize:[20,20], iconAnchor:[10,20] });
+
+  function setChipsFromState(){
+    latVal.textContent = state.lat.toFixed(6).replace(".", ",");
+    latVal.classList.remove("pending");
+    lonVal.textContent = state.lon.toFixed(6).replace(".", ",");
+    lonVal.classList.remove("pending");
+    accVal.textContent = state.acc != null ? `± ${Math.round(state.acc)} m` : "manual";
+    accVal.classList.remove("pending");
+  }
+
+  function placeManualPoint(lat, lon){
+    state.lat = lat; state.lon = lon; state.acc = null;
+    setChipsFromState();
+    manualLatInput.value = lat.toFixed(6).replace(".", ",");
+    manualLonInput.value = lon.toFixed(6).replace(".", ",");
+    const ll = [lat, lon];
+    if(manualMarker){ manualMarker.setLatLng(ll); }
+    else { manualMarker = L.marker(ll, { icon:manualIcon, draggable:true }).addTo(map); }
+    manualMarker.on("dragend", function(e){
+      const p = e.target.getLatLng();
+      placeManualPoint(p.lat, p.lng);
+    });
+    manualMarker.bindPopup("Punto manual (arrástralo para ajustar)").openPopup();
+  }
+
+  function mapClickHandler(e){
+    if(currentMode !== "manual") return;
+    placeManualPoint(e.latlng.lat, e.latlng.lng);
+  }
+  map.on("click", mapClickHandler);
+
+  function parseManualNumber(str){
+    const n = parseFloat(String(str).trim().replace(",", "."));
+    return isNaN(n) ? null : n;
+  }
+
+  function syncFromInputs(){
+    const lat = parseManualNumber(manualLatInput.value);
+    const lon = parseManualNumber(manualLonInput.value);
+    document.getElementById("err-manual").style.display = "none";
+    if(lat === null || lon === null) return;
+    if(lat < -90 || lat > 90 || lon < -180 || lon > 180){
+      document.getElementById("err-manual").style.display = "block";
+      return;
+    }
+    placeManualPoint(lat, lon);
+    map.setView([lat, lon], Math.max(map.getZoom(), 15));
+  }
+  manualLatInput.addEventListener("change", syncFromInputs);
+  manualLonInput.addEventListener("change", syncFromInputs);
+
+  function setMode(mode){
+    currentMode = mode;
+    document.querySelectorAll(".mode-btn").forEach(b=>{
+      b.classList.toggle("active", b.dataset.mode === mode);
+    });
+
+    if(mode === "manual"){
+      btnLocate.style.display = "none";
+      manualHint.style.display = "block";
+      manualCoords.style.display = "block";
+      gpsError.style.display = "none";
+      // limpia la posición automática previa para no confundir el envío
+      if(userMarker){ map.removeLayer(userMarker); userMarker = null; }
+      if(userAccuracyCircle){ map.removeLayer(userAccuracyCircle); userAccuracyCircle = null; }
+      state.lat = state.lon = state.acc = null;
+      latVal.textContent = lonVal.textContent = accVal.textContent = "— —";
+      [latVal, lonVal, accVal].forEach(el=>el.classList.add("pending"));
+    } else {
+      btnLocate.style.display = "flex";
+      manualHint.style.display = "none";
+      manualCoords.style.display = "none";
+      if(manualMarker){ map.removeLayer(manualMarker); manualMarker = null; }
+      state.lat = state.lon = state.acc = null;
+      latVal.textContent = lonVal.textContent = accVal.textContent = "— —";
+      [latVal, lonVal, accVal].forEach(el=>el.classList.add("pending"));
+      locate();
+    }
+  }
+
+  modeToggle.addEventListener("click", function(e){
+    const btn = e.target.closest(".mode-btn");
+    if(!btn) return;
+    setMode(btn.dataset.mode);
+  });
+
+  // ---------- foto ----------
+  const fotoInput = document.getElementById("foto");
+  const fotoPreview = document.getElementById("fotoPreview");
+
+  fotoInput.addEventListener("change", function(e){
+    const file = e.target.files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = function(ev){
+      const img = new Image();
+      img.onload = function(){
+        let {width, height} = img;
+        const maxDim = CONFIG.IMG_MAX_DIM;
+        if(width > maxDim || height > maxDim){
+          if(width > height){ height = Math.round(height * maxDim / width); width = maxDim; }
+          else { width = Math.round(width * maxDim / height); height = maxDim; }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL("image/jpeg", CONFIG.IMG_QUALITY);
+        state.photoBase64 = dataUrl;
+        fotoPreview.src = dataUrl;
+        fotoPreview.style.display = "block";
+      };
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+
+  // ---------- validación ----------
+  const form = document.getElementById("fieldForm");
+  const btnSubmit = document.getElementById("btnSubmit");
+
+  function showFieldError(id, show){
+    document.getElementById("err-"+id).style.display = show ? "block" : "none";
+  }
+
+  function validate(){
+    let ok = true;
+    const nombre = document.getElementById("nombre").value.trim();
+    const descripcion = document.getElementById("descripcion").value.trim();
+
+    showFieldError("nombre", nombre === "");
+    if(nombre === "") ok = false;
+
+    showFieldError("descripcion", descripcion === "");
+    if(descripcion === "") ok = false;
+
+    if(currentMode === "manual"){
+      syncFromInputs(); // por si el usuario escribió y no salió del campo (blur)
+    }
+
+    if(state.lat === null || state.lon === null){
+      const msg = currentMode === "manual"
+        ? "Escribe coordenadas válidas o toca el mapa para marcar tu ubicación."
+        : "Debes obtener la ubicación antes de enviar.";
+      if(currentMode === "manual"){
+        document.getElementById("err-manual").textContent = msg;
+        document.getElementById("err-manual").style.display = "block";
+      } else {
+        gpsError.textContent = msg;
+        gpsError.style.display = "block";
+      }
+      ok = false;
+    }
+    return ok;
+  }
+
+  function buildPayload(){
+    return {
+      nombre: document.getElementById("nombre").value.trim(),
+      descripcion: document.getElementById("descripcion").value.trim(),
+      dt: nowParts(),
+      latitud: state.lat, longitud: state.lon, precision: state.acc,
+      foto: state.photoBase64
+    };
+  }
+
+  function sendToGoogleForms(payload){
+    return new Promise((resolve)=>{
+      // Tu hoja de Sheets usa coma como separador decimal (configuración
+      // regional). Enviamos las coordenadas ya en ese formato para que
+      // Sheets las guarde como el número correcto, en vez de reinterpretar
+      // el punto decimal como separador de miles y corromper el valor.
+      const fmtCoord = n => n.toFixed(6).replace(".", ",");
+
+      const fd = new FormData();
+      fd.append(CONFIG.ENTRY.nombre, payload.nombre);
+      fd.append(CONFIG.ENTRY.descripcion, payload.descripcion);
+      fd.append(CONFIG.ENTRY.latitud, fmtCoord(payload.latitud));
+      fd.append(CONFIG.ENTRY.longitud, fmtCoord(payload.longitud));
+
+      // pregunta nativa "Hora"
+      fd.append(CONFIG.ENTRY.hora + "_hour", payload.dt.hour);
+      fd.append(CONFIG.ENTRY.hora + "_minute", payload.dt.minute);
+
+      // pregunta nativa "Fecha"
+      fd.append(CONFIG.ENTRY.fecha + "_year", String(payload.dt.year));
+      fd.append(CONFIG.ENTRY.fecha + "_month", String(payload.dt.month));
+      fd.append(CONFIG.ENTRY.fecha + "_day", String(payload.dt.day));
+
+      // PENDIENTE: descomenta cuando tengas el entry.xxxx de la pregunta de foto
+      // fd.append(CONFIG.ENTRY.fotografia, payload.foto || "");
+      if(CONFIG.ENTRY.fotografia){
+        fd.append(CONFIG.ENTRY.fotografia, payload.foto || "");
+      }
+
+      fetch(CONFIG.FORM_ACTION_URL, { method:"POST", mode:"no-cors", body:fd })
+        .then(()=> resolve(true)).catch(()=> resolve(false));
+    });
+  }
+
+  // ---------- cola offline ----------
+  function getQueue(){ try{ return JSON.parse(localStorage.getItem(QUEUE_KEY)) || []; }catch(e){ return []; } }
+  function setQueue(q){ localStorage.setItem(QUEUE_KEY, JSON.stringify(q)); renderPending(); }
+  function renderPending(){
+    const q = getQueue();
+    document.getElementById("pendingText").textContent = `${q.length} registro(s) pendiente(s)`;
+    document.getElementById("pendingBar").style.display = q.length ? "flex" : "none";
+  }
+  async function trySync(){
+    if(!navigator.onLine) return;
+    let q = getQueue();
+    if(!q.length) return;
+    const remaining = [];
+    for(const item of q){
+      const ok = await sendToGoogleForms(item);
+      if(!ok) remaining.push(item);
+    }
+    setQueue(remaining);
+  }
+  document.getElementById("btnSync").addEventListener("click", trySync);
+  renderPending();
+
+  // ---------- submit ----------
+  form.addEventListener("submit", async function(e){
+    e.preventDefault();
+    if(!validate()) return;
+
+    btnSubmit.disabled = true;
+    btnSubmit.textContent = "Enviando…";
+
+    const payload = buildPayload();
+
+    if(navigator.onLine){ await sendToGoogleForms(payload); }
+    else { const q = getQueue(); q.push(payload); setQueue(q); }
+
+    btnSubmit.disabled = false;
+    btnSubmit.textContent = "Registrar punto";
+    document.getElementById("successScreen").classList.add("show");
+  });
+
+  document.getElementById("btnAnother").addEventListener("click", function(){
+    document.getElementById("successScreen").classList.remove("show");
+    form.reset();
+    fotoPreview.style.display = "none";
+    state.photoBase64 = "";
+    state.lat = state.lon = state.acc = null;
+    latVal.textContent = lonVal.textContent = accVal.textContent = "— —";
+    [latVal, lonVal, accVal].forEach(el=>el.classList.add("pending"));
+
+    if(currentMode === "manual"){
+      if(manualMarker){ map.removeLayer(manualMarker); manualMarker = null; }
+    } else {
+      locate();
+    }
+  });
+
+  // ==================================================================
+  // Vista de mapa con TODOS los registros (lee Google Sheets)
+  // ==================================================================
+  const captureView = document.getElementById("captureView");
+  const recordsView = document.getElementById("recordsView");
+  const tabCapture = document.getElementById("tabCapture");
+  const tabRecords = document.getElementById("tabRecords");
+
+  let recordsMap = null;
+  let recordsCluster = null;
+  let recordsLoadedOnce = false;
+
+  function initRecordsMap(){
+    if(recordsMap) return;
+    recordsMap = L.map('recordsMap', { zoomControl:true, attributionControl:false }).setView([-1.8312, -78.1834], 6);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      maxZoom: 19, subdomains:'abcd'
+    }).addTo(recordsMap);
+    recordsCluster = L.markerClusterGroup({ maxClusterRadius:45 });
+    recordsMap.addLayer(recordsCluster);
+  }
+
+  function sheetCsvUrl(){
+    const base = `https://docs.google.com/spreadsheets/d/${MAP_CONFIG.SHEET_ID}/gviz/tq`;
+    const params = new URLSearchParams({ tqx:"out:csv", sheet: MAP_CONFIG.SHEET_NAME });
+    return `${base}?${params.toString()}`;
+  }
+
+  function escapeHtml(str){
+    return String(str || "").replace(/[&<>"']/g, s => ({
+      "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
+    }[s]));
+  }
+
+  function buildRecordPopup(row){
+    const c = MAP_CONFIG.COLS;
+    const foto = row[c.foto];
+    const hasPhoto = foto && foto.trim().startsWith("data:image");
+    let html = `<div class="popup-card">`;
+    if(hasPhoto) html += `<img src="${foto}" alt="Foto del registro">`;
+    html += `<h3>${escapeHtml(row[c.nombre] || "Registro")}</h3>`;
+    html += `<p>${escapeHtml(row[c.descripcion] || "")}</p>`;
+    html += `<div class="meta">${escapeHtml(row[c.fecha] || "")} ${escapeHtml(row[c.hora] || "")}</div>`;
+    html += `</div>`;
+    return html;
+  }
+
+  function setLoading(pct){
+    const bar = document.getElementById("loadingBar");
+    if(bar) bar.style.width = pct + "%";
+  }
+
+  function loadRecords(){
+    if(!MAP_CONFIG.SHEET_ID || MAP_CONFIG.SHEET_ID === "TU_SHEET_ID_AQUI"){
+      document.getElementById("recordsEmpty").style.display = "block";
+      return;
+    }
+    document.getElementById("recordsEmpty").style.display = "none";
+    setLoading(30);
+    fetch(sheetCsvUrl())
+      .then(r=>{ if(!r.ok) throw new Error("No se pudo leer la hoja"); return r.text(); })
+      .then(csvText=>{
+        setLoading(70);
+        const parsed = Papa.parse(csvText, { header:true, skipEmptyLines:true });
+        renderRecordMarkers(parsed.data);
+        setLoading(100);
+        setTimeout(()=>setLoading(0), 400);
+      })
+      .catch(err=>{
+        console.error(err);
+        setLoading(0);
+        document.getElementById("recordsEmpty").textContent =
+          "No se pudieron cargar los datos. Revisa SHEET_ID y que la hoja esté compartida/publicada.";
+        document.getElementById("recordsEmpty").style.display = "block";
+      });
+  }
+
+  function renderRecordMarkers(rows){
+    recordsCluster.clearLayers();
+    const c = MAP_CONFIG.COLS;
+    const bounds = [];
+    let valid = 0;
+
+    rows.forEach(row=>{
+      // acepta coordenadas con coma decimal (locale ES) o punto (locale US)
+      const lat = parseFloat(String(row[c.latitud] || "").trim().replace(",", "."));
+      const lon = parseFloat(String(row[c.longitud] || "").trim().replace(",", "."));
+      // ignora filas corruptas/antiguas con coordenadas fuera de rango válido
+      if(isNaN(lat) || isNaN(lon)) return;
+      if(lat < -90 || lat > 90 || lon < -180 || lon > 180) return;
+
+      const marker = L.circleMarker([lat, lon], {
+        radius:8, color:"#ff7a30", weight:2, fillColor:"#ff7a30", fillOpacity:0.55
+      });
+      marker.bindPopup(buildRecordPopup(row));
+      recordsCluster.addLayer(marker);
+      bounds.push([lat, lon]);
+      valid++;
+    });
+
+    document.getElementById("countBadge").textContent = `${valid} registro${valid===1?"":"s"}`;
+    document.getElementById("recordsEmpty").style.display = valid ? "none" : "block";
+    if(!valid) document.getElementById("recordsEmpty").textContent = "Aún no hay registros en la hoja.";
+
+    if(bounds.length){
+      recordsMap.fitBounds(bounds, { padding:[40,40], maxZoom:16 });
+    }
+  }
+
+  function showTab(tab){
+    if(tab === "records"){
+      captureView.style.display = "none";
+      recordsView.style.display = "block";
+      tabRecords.classList.add("active");
+      tabCapture.classList.remove("active");
+      initRecordsMap();
+      setTimeout(()=>{ recordsMap.invalidateSize(); }, 50);
+
+      // siempre recarga al entrar a la pestaña, no solo la primera vez
+      loadRecords();
+
+      if(!recordsLoadedOnce){
+        recordsLoadedOnce = true;
+        if(MAP_CONFIG.REFRESH_MS > 0) setInterval(loadRecords, MAP_CONFIG.REFRESH_MS);
+      }
+    } else {
+      recordsView.style.display = "none";
+      captureView.style.display = "flex";
+      tabCapture.classList.add("active");
+      tabRecords.classList.remove("active");
+      setTimeout(()=>{ map.invalidateSize(); }, 50);
+    }
+  }
+
+  tabCapture.addEventListener("click", ()=>showTab("capture"));
+  tabRecords.addEventListener("click", ()=>showTab("records"));
+  document.getElementById("btnRefreshRecords").addEventListener("click", loadRecords);
+  document.getElementById("btnGoRecords").addEventListener("click", function(){
+    document.getElementById("successScreen").classList.remove("show");
+    showTab("records");
+    // el envío recién ocurrió: a veces la hoja tarda un par de segundos en
+    // reflejar la fila nueva, así que reintentamos una vez más de forma silenciosa
+    setTimeout(loadRecords, 2500);
+  });
+
+})();
+</script>
+</body>
+</html>
