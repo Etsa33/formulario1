@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mapa de Registros de Campo</title>
+
+<!--
+==================================================================================
+  CONFIGURACIÓN — edita SOLO este bloque
+==================================================================================
+  1) Abre tu hoja de respuestas de Google Sheets.
+  2) Archivo → Compartir → Publicar en la Web → selecciona la hoja →
+     formato CSV (o simplemente "Cualquier persona con el enlace: Lector").
+  3) Copia el ID de la hoja: es la parte de la URL entre "/d/" y "/edit".
+  4) Ajusta SHEET_NAME al nombre de la pestaña ("Respuestas de formulario 1").
+  5) Ajusta COLS a las cabeceras EXACTAS que Google Sheets generó para tu
+     formulario (usa el mismo orden en el que aparecen las columnas).
+-->
+<script>
+const MAP_CONFIG = {
+  SHEET_ID: "TU_SHEET_ID_AQUI",
+  SHEET_NAME: "Respuestas de formulario 1",
+  COLS: {
+    marcaTemporal: "Marca temporal",
+    nombre: "Nombre del registrador",
+    descripcion: "Descripción del registro",
+    categoria: "Categoría del registro",
+    fecha: "Fecha",
+    hora: "Hora",
+    latitud: "Latitud",
+    longitud: "Longitud",
+    precision: "Precisión",
+    foto: "Fotografía"
+  },
+  REFRESH_MS: 60000 // refresco automático (60s); pon 0 para desactivar
+};
+</script>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"/>
+
+<style>
+  :root{
+    --ink:#12181a; --surface:#1b2426; --line:#33453f;
+    --signal:#ff7a30; --foliage:#6fcf97; --text:#eef1ec; --text-dim:#93a29b;
+    --font-display:'Space Grotesk', system-ui, sans-serif;
+    --font-mono:'JetBrains Mono', ui-monospace, monospace;
+    --font-body:'Work Sans', system-ui, sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;font-family:var(--font-body);background:var(--ink);color:var(--text);}
+  #map{ position:absolute; top:64px; bottom:0; left:0; right:0; }
+
+  header{
+    height:64px; display:flex; align-items:center; justify-content:space-between;
+    padding:0 18px; background:var(--surface); border-bottom:1px solid var(--line);
+    position:relative; z-index:5;
+  }
+  header .title{ display:flex; flex-direction:column; }
+  header .title .eyebrow{ font-family:var(--font-mono); font-size:10px; letter-spacing:.12em; color:var(--foliage); text-transform:uppercase;}
+  header .title h1{ font-family:var(--font-display); font-size:18px; margin:2px 0 0; }
+  header .stats{ display:flex; gap:14px; align-items:center; }
+  header .stats .count{
+    font-family:var(--font-mono); font-size:12px; color:var(--text-dim);
+    border:1px solid var(--line); border-radius:20px; padding:6px 12px;
+  }
+  header button{
+    font-family:var(--font-mono); font-size:11px; text-transform:uppercase; letter-spacing:.06em;
+    background:transparent; border:1px solid var(--line); color:var(--foliage);
+    border-radius:8px; padding:7px 12px; cursor:pointer;
+  }
+
+  .leaflet-popup-content-wrapper{
+    background:var(--surface); color:var(--text); border-radius:12px; border:1px solid var(--line);
+  }
+  .leaflet-popup-tip{ background:var(--surface); }
+  .popup-card{ font-family:var(--font-body); font-size:13px; max-width:230px; }
+  .popup-card img{ width:100%; border-radius:8px; margin-bottom:8px; display:block; }
+  .popup-card .cat{
+    display:inline-block; font-family:var(--font-mono); font-size:10px; color:var(--signal);
+    border:1px solid var(--signal); border-radius:20px; padding:2px 8px; margin-bottom:6px; text-transform:uppercase;
+  }
+  .popup-card h3{ font-family:var(--font-display); font-size:14px; margin:0 0 4px; }
+  .popup-card p{ margin:0 0 6px; color:var(--text-dim); line-height:1.4; }
+  .popup-card .meta{ font-family:var(--font-mono); font-size:10px; color:var(--text-dim); }
+
+  .empty-state{
+    position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+    text-align:center; color:var(--text-dim); font-family:var(--font-mono); font-size:12px;
+    z-index:4; display:none;
+  }
+  .loading-bar{
+    position:absolute; top:0; left:0; height:2px; background:var(--signal);
+    width:0%; transition:width .3s ease; z-index:6;
+  }
+</style>
+</head>
+<body>
+
+<div class="loading-bar" id="loadingBar"></div>
+<header>
+  <div class="title">
+    <div class="eyebrow">Visor de campo</div>
+    <h1>Mapa de Registros</h1>
+  </div>
+  <div class="stats">
+    <span class="count" id="countBadge">0 registros</span>
+    <button id="btnRefresh">Actualizar</button>
+  </div>
+</header>
+
+<div id="map"></div>
+<div class="empty-state" id="emptyState">Aún no hay registros en la hoja de cálculo.</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+
+<script>
+(function(){
+  "use strict";
+
+  const map = L.map('map', { zoomControl: true }).setView([0,0], 2);
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+
+  const clusterGroup = L.markerClusterGroup({ maxClusterRadius: 45 });
+  map.addLayer(clusterGroup);
+
+  function sheetCsvUrl(){
+    const base = `https://docs.google.com/spreadsheets/d/${MAP_CONFIG.SHEET_ID}/gviz/tq`;
+    const params = new URLSearchParams({
+      tqx: "out:csv",
+      sheet: MAP_CONFIG.SHEET_NAME
+    });
+    return `${base}?${params.toString()}`;
+  }
+
+  function setLoading(pct){
+    document.getElementById("loadingBar").style.width = pct + "%";
+  }
+
+  function escapeHtml(str){
+    return String(str || "").replace(/[&<>"']/g, s => ({
+      "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
+    }[s]));
+  }
+
+  function buildPopup(row){
+    const c = MAP_CONFIG.COLS;
+    const foto = row[c.foto];
+    const hasPhoto = foto && foto.trim().startsWith("data:image");
+    let html = `<div class="popup-card">`;
+    if(hasPhoto) html += `<img src="${foto}" alt="Foto del registro">`;
+    if(row[c.categoria]) html += `<span class="cat">${escapeHtml(row[c.categoria])}</span>`;
+    html += `<h3>${escapeHtml(row[c.nombre] || "Registro")}</h3>`;
+    html += `<p>${escapeHtml(row[c.descripcion] || "")}</p>`;
+    html += `<div class="meta">${escapeHtml(row[c.fecha] || "")} ${escapeHtml(row[c.hora] || "")}</div>`;
+    html += `</div>`;
+    return html;
+  }
+
+  function loadData(){
+    setLoading(30);
+    fetch(sheetCsvUrl())
+      .then(r => {
+        if(!r.ok) throw new Error("No se pudo leer la hoja. Verifica que esté publicada/compartida.");
+        return r.text();
+      })
+      .then(csvText => {
+        setLoading(70);
+        const parsed = Papa.parse(csvText, { header:true, skipEmptyLines:true });
+        renderMarkers(parsed.data);
+        setLoading(100);
+        setTimeout(()=>setLoading(0), 400);
+      })
+      .catch(err => {
+        console.error(err);
+        setLoading(0);
+        document.getElementById("emptyState").textContent =
+          "No se pudieron cargar los datos. Revisa la configuración de SHEET_ID / publicación de la hoja.";
+        document.getElementById("emptyState").style.display = "block";
+      });
+  }
+
+  function renderMarkers(rows){
+    clusterGroup.clearLayers();
+    const c = MAP_CONFIG.COLS;
+    const bounds = [];
+    let valid = 0;
+
+    rows.forEach(row => {
+      // acepta coordenadas con coma decimal (locale ES) o punto (locale US)
+      const lat = parseFloat(String(row[c.latitud] || "").trim().replace(",", "."));
+      const lon = parseFloat(String(row[c.longitud] || "").trim().replace(",", "."));
+      // ignora filas corruptas/antiguas con coordenadas fuera de rango válido
+      if(isNaN(lat) || isNaN(lon)) return;
+      if(lat < -90 || lat > 90 || lon < -180 || lon > 180) return;
+
+      const marker = L.circleMarker([lat, lon], {
+        radius: 8,
+        color: "#ff7a30",
+        weight: 2,
+        fillColor: "#ff7a30",
+        fillOpacity: 0.55
+      });
+      marker.bindPopup(buildPopup(row));
+      clusterGroup.addLayer(marker);
+      bounds.push([lat, lon]);
+      valid++;
+    });
+
+    document.getElementById("countBadge").textContent = `${valid} registro${valid===1?"":"s"}`;
+    document.getElementById("emptyState").style.display = valid ? "none" : "block";
+
+    if(bounds.length){
+      map.fitBounds(bounds, { padding:[40,40], maxZoom:16 });
+    }
+  }
+
+  document.getElementById("btnRefresh").addEventListener("click", loadData);
+  loadData();
+  if(MAP_CONFIG.REFRESH_MS > 0){
+    setInterval(loadData, MAP_CONFIG.REFRESH_MS);
+  }
+})();
+</script>
+</body>
+</html>
